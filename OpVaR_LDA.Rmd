@@ -1,0 +1,915 @@
+---
+title: "Projekt - Modele Ryzyka"
+author: "Wiktor Suchoński-Romaniuk"
+output:
+  html_document:
+    math_method:
+      engine: katex
+    theme: bootstrap
+    df_print: paged
+    css: style.css
+    toc: true
+    toc_float:
+      smooth_scroll: true
+    code_folding: show
+---
+
+<style>
+p {
+  text-align: justify;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(fig.align = "center")
+knitr::opts_chunk$set(dpi = 200)
+```
+
+# Część I
+
+## Wprowadzenie
+
+Celem niniejszego badania jest modelowanie łącznej straty operacyjnej przy wykorzystaniu podejścia Loss Distribution Approach (LDA), opartego na niezależnym szacowaniu rozkładów częstotliwości oraz dotkliwości zdarzeń dla poszczególnych linii biznesowych. Rozkład liczb strat w roku będzie wybierany spośród rozkładu Poissona, dwumianowego oraz ujemnego dwumianowego na podstawie stosunku średniej i wariancji. Po wyborze rozkładu, ich parametry będą obliczane w następujący sposób:
+
+\begin{align*}
+\hat{\lambda} &= EX && \text{--- Rozkład Poissona} \\
+\hat{p} = 1 - \frac{D^2 X}{EX}, \quad \hat{n} &= \text{round} \left( \frac{EX}{\hat{p}} \right) && \text{--- Rozkład Dwumianowy} \\
+\hat{size} = \frac{(EX)^2}{D^2 X - EX}, \quad \hat{p} &= \frac{EX}{D^2 X} && \text{--- Rozkład Ujemny Dwumianowy}
+\end{align*}
+
+Aby wybrać rozkład dla dotkliwości strat , testowane będą rozkłady ciągłe takie jak rozkład Weibulla, Gamma, log-normalny oraz wykładniczy. Do estymacji parametrów wykorzystana zostanie funkcja fitdist z pakietu fitdistrplus. W celu oceny jakości dopasowania modeli wykorzystane zostaną statystyki z funkcji gofstat, obejmujące testy Kołmogorowa-Smirnowa (KS), Andersona-Darlinga (AD) oraz kryterium informacyjne Akaike (AIC). Najważniejsza będzie statystyka AD, ponieważ przypisuje ona większą wagę ogonom rozkładu, co jest kluczowe w modelowaniu ekstremalnych strat. Szukamy modeli o najniższych wartościach tych statystyk oraz najniższym parametrze AIC, co świadczy o minimalizacji straty informacji. Po wyborze rozkładu, jego parametry będą wyciągane z wektora estymatorów z wyniku funkcji fitdist. 
+
+Zostaną również przeprowadzone 3 wersje oryginalnego badania, w których z góry założymy, że rozkład dotkliwości będzie opisany kolejno: rozkładem lognorm, wykładniczym, weibulla. 
+
+Na końcu przeprowadzona zostanie symulacja Monte Carlo, oraz wyznaczenie Value at Risk oraz Expected Shortfall na poziomie ufności 99,9%. Proces ten będzie powtórzony 10 razy, a wyniki zostaną uśrednione.
+
+
+
+## Dane
+
+Dane zawierają informacje o pojedynczych stratach operacyjnych w latach 1989-2023 dla 7 różnych linii biznesowych firmy. Aby poznać najbardziej pasujący rozkład liczby strat w ciągu roku dla każdej linii biznesowej, obliczono średnią oraz wariancję oraz porównano obie te miary. Zgodnie z teorią, przyjmujemy dany rozkład jeśli:
+
+\begin{align*}
+    D^2X < EX &\implies \text{Rozkład Dwumianowy} \\
+    D^2X = EX &\implies \text{Rozkład Poissona} \\
+    D^2X > EX &\implies \text{Rozkład Ujemny Dwumianowy}
+\end{align*}
+
+Założono, że rozkład Poissona jest sugerowany jeśli stosunek różnicy wariancji i średniej do średniej będzie mniejszy niż wartość bezwzględna z 0.27. Jest to jedynie sugestia dobrania konkretnego rozkładu, dla każdej linii osobno będzie to potwierdzane testami. 
+
+```{r include=FALSE}
+library(tidyr)
+library(fitdistrplus)
+library(dplyr)
+library(kableExtra)
+library(ggplot2)
+library(scales)
+```
+
+```{r}
+dane <- read.csv("plik13.csv") %>% dplyr::select(2:4)
+```
+
+```{r}
+diagnostyka_linii <- dane %>%
+  group_by(linia, rok) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  
+  group_by(linia) %>%
+  summarise(
+    Srednia = mean(n),
+    Wariancja = var(n),
+    Roznica = (Wariancja - Srednia) / Srednia
+  ) %>%
+  mutate(Sugestia_rozklad = case_when(
+    Roznica < -0.27 ~ "Dwumianowy",
+    abs(Roznica) <= 0.27 ~ "Poissona",
+    Roznica > 0.27 ~ "Ujemny Dwumianowy"
+  ))
+
+kable(diagnostyka_linii)
+```
+
+
+```{r}
+
+liczba_strat <- dane %>%
+  group_by(linia, rok) %>%
+  summarise(n = n(), .groups = "drop")
+
+lista_czestosci <- split(liczba_strat$n, liczba_strat$linia)
+
+lista_strat <- split(dane$strata, dane$linia)
+
+```
+
+## Linia Buss_Distr
+
+Dla linii Buss_Distr został zaproponowany rozkład dwumianowy.  Wyniki testów potwierdzają ten wybór, AIC jest najmniejsze, a P-Value przy teście chi2 jedyne nie odrzuciło rozkładu dwumianowego. Metodą momentów są wyliczane parametry rozkładu. 
+
+```{r}
+
+rok <- lista_czestosci$Buss_Distr
+
+p <- 1 - (var(rok) / mean(rok))
+
+n <- round(mean(rok) / p)
+
+poisson <- fitdist(rok, method="mme", "pois")
+
+dwumianowy <- fitdist(rok, "binom", fix.arg = list(size = n))
+
+dwumianowyU <- fitdist(rok, "nbinom")
+
+
+testy_czestosc <- gofstat(list(poisson, dwumianowy, dwumianowyU))
+
+
+wyniki_czestosc <- data.frame(
+  Model = c("Poisson", "Binomial", "Neg-Binomial"),
+  AIC = testy_czestosc$aic,
+  Chi2_Pvalue = testy_czestosc$chisqpvalue
+
+)
+wyniki_czestosc <- wyniki_czestosc[order(wyniki_czestosc$AIC), ]
+kable(wyniki_czestosc, row.names = FALSE)
+
+```
+Dla tej linii rozkład Weibulla najlepiej pasuje do rozkładu dotkliwości strat. Parametr AIC wyszedł najmniejszy podobnie jak statystyki testów KS i AD. 
+Wyciągnięto odpowiednie parametry z rozkładu - shape i scale.
+
+```{r}
+straty <- lista_strat$Buss_Distr
+
+r1 <- fitdist(straty, "weibull")
+r2 <- fitdist(straty, method="mme", "lnorm")
+r3 <- fitdist(straty, method="mme", "exp")
+r4 <- fitdist(straty, method="mme", "gamma")
+
+test <- gofstat(list(r1,r2,r3, r4), fitnames = c("weibull", "lnorm", "exp", "gamma"))
+
+wyniki_tabelka <- data.frame(
+  Model = c("Weibull", "Lognormal", "Exp", "Gamma"),
+  AIC = test$aic,
+  KS_test = test$ks,
+  AD_test = test$ad
+)
+
+wyniki_tabelka <- wyniki_tabelka[order(wyniki_tabelka$AIC), ]
+
+
+kable(wyniki_tabelka)
+
+shape_w <- r1$estimate["shape"]
+scale_w <- r1$estimate["scale"]
+
+```
+Za pomocą pętli generowane jest 20 000 scenariuszy liczby strat i ich dotkliwości na kolejny rok. Wszystkie dotkliwości są sumowane i zapisywane do wektora. 
+
+```{r}
+set.seed(12)
+liczba_scenariuszy <- 20000
+roczne_straty1 <- numeric(liczba_scenariuszy)
+liczba_strat1 <- rbinom(n = liczba_scenariuszy, size = n, prob = p)
+
+for(i in 1:liczba_scenariuszy){
+  n_w_roku <- liczba_strat1[i]
+  if(n_w_roku > 0){
+    kwoty <- rweibull(n = n_w_roku, shape = shape_w, scale = scale_w)
+    roczne_straty1[i] <- sum(kwoty)
+  }
+  else {
+    roczne_straty1[i] <- 0
+  }
+}
+
+```
+
+## Linia Com_Ban
+
+Dla linii Com_Ban został zasugerowany rozkład dwumianowy ujemny dla rozkładu ilości strat. Przez wyraźnie większą wariancję niż średnią, funkcja fitdist dla rozkładu dwumianowego nie skompilowała się. Testami sprawdzane są zatem pozostałe rozkłady. Żaden nie został odrzucony, jednak na podstawie sugestii oraz niższego AIC i wyższego P-Value w teście chi2 wybrany zostaje rozkład dwumianowy ujemny.
+
+```{r echo=FALSE}
+
+rok <- lista_czestosci$Com_Ban
+
+p <- 1 - (var(rok) / mean(rok))
+
+n <- round(mean(rok) / p)
+
+poisson <- fitdist(rok, method="mme", "pois")
+
+#dwumianowy <- fitdist(rok, "binom", fix.arg = list(size = n))
+
+dwumianowyU <- fitdist(rok, "nbinom")
+
+
+testy_czestosc <- gofstat(list(poisson,dwumianowyU))
+
+wyniki_czestosc <- data.frame(
+  Model = c("Poisson", "Neg-Binomial"),
+  AIC = testy_czestosc$aic,
+  Chi2_Pvalue = testy_czestosc$chisqpvalue
+
+)
+wyniki_czestosc <- wyniki_czestosc[order(wyniki_czestosc$AIC), ]
+kable(wyniki_czestosc, row.names = FALSE)
+
+```
+Dla tej linii do rozkładu dotkliwości strat ciężko dopasować jednoznaczenie rozkład. Parametr AIC oraz statystyka testu KS wyszły najmniejsze dla rozkładu Weibulla, jednak przy teście AD, o wiele ważniejszym dla nas, rozkład sobie nie poradził. Zgodnie z opisem zadania, w przypadku wątpliwości co do wyboru rozkładu dotkliwości strat, zostaje wybrany rozkład logNorm. Obliczono odpowiednie parametry dla obu rozkładów (częstości i dotkliwości).
+
+```{r echo=FALSE}
+straty <- lista_strat$Com_Ban
+
+r1 <- fitdist(straty, "weibull")
+r2 <- fitdist(straty, method="mme", "lnorm")
+r3 <- fitdist(straty, method="mme", "exp")
+r4 <- fitdist(straty, method="mme", "gamma")
+
+#test <- gofstat(list(r1,r2,r3, r4), fitnames = c("weibull", "lnorm", "exp", "gamma"))
+
+test1 <- gofstat(r1)
+test2 <- gofstat(r2)
+test3 <- gofstat(r3)
+test4 <- gofstat(r4)
+
+wyniki_tabelka <- data.frame(
+  Model = c("Weibull", "Lognormal", "Exp", "Gamma"),
+  AIC = c(test1$aic, test2$aic, test3$aic,test4$aic),
+  KS_test = c(test1$ks, test2$ks, test3$ks,test4$ks),
+  AD_test = c(test1$ad, test2$ad, test3$ad, test4$ad)
+)
+
+wyniki_tabelka <- wyniki_tabelka[order(wyniki_tabelka$AIC), ]
+
+kable(wyniki_tabelka, row.names = FALSE)
+
+
+#wybieramy lognorm i dwumianowy ujemny
+
+```
+
+```{r}
+
+n <- mean(rok)^2 / (var(rok) - mean(rok))
+p <- mean(rok) / var(rok)
+
+meanlog <- r2$estimate["meanlog"]
+sdlog <- r2$estimate["sdlog"]
+
+```
+
+```{r echo=FALSE}
+set.seed(12)
+liczba_scenariuszy <- 20000
+roczne_straty2 <- numeric(liczba_scenariuszy)
+liczba_strat2 <- rnbinom(n = liczba_scenariuszy, size = n, prob = p)
+
+
+
+for(i in 1:liczba_scenariuszy){
+  n_w_roku <- liczba_strat2[i]
+  if(n_w_roku > 0){
+    kwoty <- rlnorm(n = n_w_roku, meanlog = meanlog, sdlog = sdlog)
+    roczne_straty2[i] <- sum(kwoty)
+  }
+  else {
+    roczne_straty2[i] <- 0
+  }
+}
+
+```
+
+
+## Linia Damage
+
+Dla linii Damage został zaproponowany rozkład dwumianowy. Wyniki testów potwierdzają ten wybór, AIC jest najmniejsze, a P-Value przy teście chi2 największe, pomimo, że żaden rozkład nie został odrzucony.
+
+```{r echo=FALSE}
+
+rok <- lista_czestosci$Damage
+
+p <- 1 - (var(rok) / mean(rok))
+
+n <- round(mean(rok) / p)
+
+poisson <- fitdist(rok, method="mme", "pois")
+
+dwumianowy <- fitdist(rok, "binom", fix.arg = list(size = n))
+
+dwumianowyU <- fitdist(rok, "nbinom")
+
+
+testy_czestosc <- gofstat(list(poisson, dwumianowy, dwumianowyU))
+
+wyniki_czestosc <- data.frame(
+  Model = c("Poisson", "Binomial", "Neg-Binomial"),
+  AIC = testy_czestosc$aic,
+  Chi2_Pvalue = testy_czestosc$chisqpvalue
+)
+wyniki_czestosc <- wyniki_czestosc[order(wyniki_czestosc$AIC), ]
+kable(wyniki_czestosc, row.names = FALSE)
+
+```
+
+Dla tej linii rozkład Weibulla najlepiej pasuje do rozkładu dotkliwości strat. Parametr AIC wyszedł najmniejszy podobnie jak statystyki testów KS i AD. 
+Wyciągnięto odpowiednie parametry z rozkładu - shape i scale.
+
+```{r echo=FALSE}
+straty <- lista_strat$Damage
+
+r1 <- fitdist(straty, "weibull")
+r2 <- fitdist(straty, method="mme", "lnorm")
+r3 <- fitdist(straty, method="mme", "exp")
+r4 <- fitdist(straty, method="mme", "gamma")
+
+test <- gofstat(list(r1,r2,r3, r4), fitnames = c("weibull", "lnorm", "exp", "gamma"))
+
+wyniki_tabelka <- data.frame(
+  Model = c("Weibull", "Lognormal", "Exp", "Gamma"),
+  AIC = test$aic,
+  KS_test = test$ks,
+  AD_test = test$ad
+)
+
+wyniki_tabelka <- wyniki_tabelka[order(wyniki_tabelka$AIC), ]
+
+kable(wyniki_tabelka)
+
+#wybieramy weibulla i dwumianowy
+```
+
+```{r}
+shape_w <- r1$estimate["shape"]
+scale_w <- r1$estimate["scale"]
+```
+
+```{r echo=FALSE}
+set.seed(12)
+liczba_scenariuszy <- 20000
+roczne_straty3 <- numeric(liczba_scenariuszy)
+liczba_strat3 <- rbinom(n = liczba_scenariuszy, size = n, prob = p)
+
+
+for(i in 1:liczba_scenariuszy){
+  n_w_roku <- liczba_strat3[i]
+  if(n_w_roku > 0){
+    kwoty <- rweibull(n = n_w_roku, shape = shape_w, scale = scale_w)
+    roczne_straty3[i] <- sum(kwoty)
+  }
+  else {
+    roczne_straty3[i] <- 0
+  }
+}
+
+```
+
+## Linia Empl_Pract
+
+Dla linii Empl_Pract został zaproponowany rozkład Poissona do opisania rozkładu liczby strat. Test chi2 nie odrzucił żadnego rozkładu, a parametr AIC wyszedł dla wszystkich bardzo podobny. Zostanie więc wybrany zgodnie z sugestią rozkład Poissona.
+
+```{r echo=FALSE}
+
+rok <- lista_czestosci$Empl_Pract
+
+p <- 1 - (var(rok) / mean(rok))
+
+n <- round(mean(rok) / p)
+
+poisson <- fitdist(rok, method="mme", "pois")
+
+dwumianowy <- fitdist(rok, "binom", fix.arg = list(size = n))
+
+dwumianowyU <- fitdist(rok, "nbinom")
+
+
+testy_czestosc <- gofstat(list(poisson, dwumianowy, dwumianowyU))
+
+wyniki_czestosc <- data.frame(
+  Model = c("Poisson", "Binomial", "Neg-Binomial"),
+  AIC = testy_czestosc$aic,
+  Chi2_Pvalue = testy_czestosc$chisqpvalue
+
+)
+wyniki_czestosc <- wyniki_czestosc[order(wyniki_czestosc$AIC), ]
+kable(wyniki_czestosc, row.names = FALSE)
+
+```
+
+Dla tej linii rozkład Weibulla najlepiej pasuje do rozkładu dotkliwości strat. Parametr AIC wyszedł najmniejszy podobnie jak statystyki testów KS i szczególnie AD czyli istotniejszego. 
+Wyciągnięto odpowiednie parametry z rozkładu - shape i scale.
+
+```{r echo=FALSE}
+straty <- lista_strat$Empl_Pract
+
+r1 <- fitdist(straty, "weibull")
+r2 <- fitdist(straty, method="mme", "lnorm")
+r3 <- fitdist(straty, method="mme", "exp")
+r4 <- fitdist(straty, method="mme", "gamma")
+
+test <- gofstat(list(r1,r2,r3, r4), fitnames = c("weibull", "lnorm", "exp", "gamma"))
+
+wyniki_tabelka <- data.frame(
+  Model = c("Weibull", "Lognormal", "Exp", "Gamma"),
+  AIC = test$aic,
+  KS_test = test$ks,
+  AD_test = test$ad
+)
+
+wyniki_tabelka <- wyniki_tabelka[order(wyniki_tabelka$AIC), ]
+
+kable(wyniki_tabelka)
+
+#wybieramy weibulla i poissona
+
+```
+
+```{r}
+
+lambda <- mean(rok)
+
+shape_w <- r1$estimate["shape"]
+scale_w <- r1$estimate["scale"]
+
+```
+
+```{r echo=FALSE}
+set.seed(12)
+liczba_scenariuszy <- 20000
+roczne_straty4 <- numeric(liczba_scenariuszy)
+liczba_strat4 <- rpois(n = liczba_scenariuszy, lambda = lambda)
+
+for(i in 1:liczba_scenariuszy){
+  n_w_roku <- liczba_strat4[i]
+  if(n_w_roku > 0){
+    kwoty <- rweibull(n = n_w_roku, shape = shape_w, scale = scale_w)
+    roczne_straty4[i] <- sum(kwoty)
+  }
+  else {
+    roczne_straty4[i] <- 0
+  }
+}
+
+```
+
+## Linia Execut_Del
+
+Dla linii Execut_Del został zaproponowany rozkład Poissona do opisania rozkładu liczby strat. Test chi2 nie odrzucił żadnego rozkładu, a parametr AIC wyszedł dla wszystkich bardzo podobny. Zostanie więc wybrany zgodnie z sugestią rozkład Poissona.
+
+```{r echo=FALSE}
+
+rok <- lista_czestosci$Execut_Del
+
+p <- 1 - (var(rok) / mean(rok))
+
+n <- round(mean(rok) / p)
+
+poisson <- fitdist(rok, method="mme", "pois")
+
+dwumianowy <- fitdist(rok, "binom", fix.arg = list(size = n))
+
+dwumianowyU <- fitdist(rok, "nbinom")
+
+
+testy_czestosc <- gofstat(list(poisson, dwumianowy, dwumianowyU))
+
+wyniki_czestosc <- data.frame(
+  Model = c("Poisson", "Binomial", "Neg-Binomial"),
+  AIC = testy_czestosc$aic,
+  Chi2_Pvalue = testy_czestosc$chisqpvalue
+
+)
+wyniki_czestosc <- wyniki_czestosc[order(wyniki_czestosc$AIC), ]
+kable(wyniki_czestosc, row.names = FALSE)
+
+```
+
+Dla tej linii rozkład Weibulla najlepiej pasuje do rozkładu dotkliwości strat. Parametr AIC wyszedł najmniejszy podobnie jak statystyki testów KS i szczególnie AD czyli istotniejszego. 
+Wyciągnięto odpowiednie parametry z rozkładu - shape i scale.
+
+```{r echo=FALSE}
+straty <- lista_strat$Execut_Del
+
+r1 <- fitdist(straty, "weibull")
+r2 <- fitdist(straty, method="mme", "lnorm")
+r3 <- fitdist(straty, method="mme", "exp")
+r4 <- fitdist(straty, method="mme", "gamma")
+
+test <- gofstat(list(r1,r2,r3, r4), fitnames = c("weibull", "lnorm", "exp", "gamma"))
+
+wyniki_tabelka <- data.frame(
+  Model = c("Weibull", "Lognormal", "Exp", "Gamma"),
+  AIC = test$aic,
+  KS_test = test$ks,
+  AD_test = test$ad
+)
+
+wyniki_tabelka <- wyniki_tabelka[order(wyniki_tabelka$AIC), ]
+
+kable(wyniki_tabelka, row.names = FALSE)
+
+#wybieramy weibulla i poissona
+```
+
+```{r}
+
+lambda <- mean(rok)
+
+shape_w <- r1$estimate["shape"]
+scale_w <- r1$estimate["scale"]
+
+```
+
+```{r echo=FALSE}
+set.seed(12)
+liczba_scenariuszy <- 20000
+roczne_straty5 <- numeric(liczba_scenariuszy)
+liczba_strat5 <- rpois(n = liczba_scenariuszy, lambda = lambda)
+
+for(i in 1:liczba_scenariuszy){
+  n_w_roku <- liczba_strat5[i]
+  if(n_w_roku > 0){
+    kwoty <- rweibull(n = n_w_roku, shape = shape_w, scale = scale_w)
+    roczne_straty5[i] <- sum(kwoty)
+  }
+  else {
+    roczne_straty5[i] <- 0
+  }
+}
+
+```
+
+## Linia External_Fr
+
+
+Dla linii External_Fr dla rozkładu ilości strat został zaproponowany rozkład dwumianowy.  Wyniki testów potwierdzają ten wybór, AIC jest najmniejsze, a P-Value przy teście chi2 jedyne nie odrzuciło rozkładu dwumianowego. Metodą momentów są wyliczane parametry rozkładu.
+
+```{r echo=FALSE}
+
+rok <- lista_czestosci$External_Fr
+
+p <- 1 - (var(rok) / mean(rok))
+
+n <- round(mean(rok) / p)
+
+poisson <- fitdist(rok, method="mme", "pois")
+
+dwumianowy <- fitdist(rok, "binom", fix.arg = list(size = n))
+
+dwumianowyU <- fitdist(rok, "nbinom")
+
+
+testy_czestosc <- gofstat(list(poisson, dwumianowy, dwumianowyU))
+
+wyniki_czestosc <- data.frame(
+  Model = c("Poisson", "Binomial", "Neg-Binomial"),
+  AIC = testy_czestosc$aic,
+  Chi2_Pvalue = testy_czestosc$chisqpvalue
+
+)
+wyniki_czestosc <- wyniki_czestosc[order(wyniki_czestosc$AIC), ]
+kable(wyniki_czestosc, row.names = FALSE)
+
+```
+
+Dla tej linii rozkład Weibulla najlepiej pasuje do rozkładu dotkliwości strat. Parametr AIC wyszedł najmniejszy podobnie jak statystyki testów KS i szczególnie AD czyli istotniejszego. 
+Wyciągnięto odpowiednie parametry z rozkładu - shape i scale.
+
+```{r echo=FALSE}
+straty <- lista_strat$External_Fr
+
+r1 <- fitdist(straty, "weibull")
+r2 <- fitdist(straty, method="mme", "lnorm")
+r3 <- fitdist(straty, method="mme", "exp")
+r4 <- fitdist(straty, method="mme", "gamma")
+
+test <- gofstat(list(r1,r2,r3, r4), fitnames = c("weibull", "lnorm", "exp", "gamma"))
+
+wyniki_tabelka <- data.frame(
+  Model = c("Weibull", "Lognormal", "Exp", "Gamma"),
+  AIC = test$aic,
+  KS_test = test$ks,
+  AD_test = test$ad
+)
+
+wyniki_tabelka <- wyniki_tabelka[order(wyniki_tabelka$AIC), ]
+
+kable(wyniki_tabelka, row.names = FALSE)
+
+#wybieramy weibulla i dwumianowy
+
+```
+
+```{r}
+
+shape_w <- r1$estimate["shape"]
+scale_w <- r1$estimate["scale"]
+
+```
+
+```{r echo=FALSE}
+set.seed(12)
+liczba_scenariuszy <- 20000
+roczne_straty6 <- numeric(liczba_scenariuszy)
+liczba_strat6 <- rbinom(n = liczba_scenariuszy, size = n, prob = p)
+
+for(i in 1:liczba_scenariuszy){
+  n_w_roku <- liczba_strat6[i]
+  if(n_w_roku > 0){
+    kwoty <- rweibull(n = n_w_roku, shape = shape_w, scale = scale_w)
+    roczne_straty6[i] <- sum(kwoty)
+  }
+  else {
+    roczne_straty6[i] <- 0
+  }
+}
+
+```
+
+## Linia Internal_Fr
+
+Dla linii Internal_Fr został zasugerowany rozkład dwumianowy ujemny dla rozkładu ilości strat. Przez wyraźnie większą wariancję niż średnią, funkcja fitdist dla rozkładu dwumianowego nie skompilowała się. Testami sprawdzane są zatem pozostałe rozkłady. Żaden nie został odrzucony, jednak na podstawie sugestii i wyższego P-Value w teście chi2 wybrany zostaje rozkład dwumianowy ujemny.
+.
+
+```{r echo=FALSE}
+
+rok <- lista_czestosci$Internal_Fr
+
+p <- 1 - (var(rok) / mean(rok))
+
+n <- round(mean(rok) / p)
+
+poisson <- fitdist(rok, method="mme", "pois")
+
+#dwumianowy <- fitdist(rok, "binom", fix.arg = list(size = n))
+
+dwumianowyU <- fitdist(rok, "nbinom")
+
+
+testy_czestosc <- gofstat(list(poisson, dwumianowyU))
+
+wyniki_czestosc <- data.frame(
+  Model = c("Poisson", "Neg-Binomial"),
+  AIC = testy_czestosc$aic,
+  Chi2_Pvalue = testy_czestosc$chisqpvalue
+
+)
+wyniki_czestosc <- wyniki_czestosc[order(wyniki_czestosc$AIC), ]
+kable(wyniki_czestosc, row.names = FALSE)
+
+```
+
+Dla tej linii rozkład Weibulla najlepiej pasuje do rozkładu dotkliwości strat. Parametr AIC wyszedł najmniejszy dla rozkładu wykładniczego, jednak różnica jest nieistotna. Najważniejsza statystyka testu AD jest najniższa przy rozkładzie Weibulla, stąd nasz wybór.
+
+```{r echo=FALSE}
+straty <- lista_strat$Internal_Fr
+
+r1 <- fitdist(straty, "weibull")
+r2 <- fitdist(straty, method="mme", "lnorm")
+r3 <- fitdist(straty, method="mme", "exp")
+r4 <- fitdist(straty, method="mme", "gamma")
+
+test <- gofstat(list(r1,r2,r3, r4), fitnames = c("weibull", "lnorm", "exp", "gamma"))
+
+wyniki_tabelka <- data.frame(
+  Model = c("Weibull", "Lognormal", "Exp", "Gamma"),
+  AIC = test$aic,
+  KS_test = test$ks,
+  AD_test = test$ad
+)
+
+wyniki_tabelka <- wyniki_tabelka[order(wyniki_tabelka$AIC), ]
+
+kable(wyniki_tabelka, row.names = FALSE)
+
+#wybieramy weibulla i dwumianowy ujemny
+```
+
+```{r}
+
+n <- mean(rok)^2 / (var(rok) - mean(rok))
+p <- mean(rok) / var(rok)
+
+shape_w <- r1$estimate["shape"]
+scale_w <- r1$estimate["scale"]
+
+```
+
+```{r echo=FALSE}
+set.seed(12)
+liczba_scenariuszy <- 20000
+roczne_straty7 <- numeric(liczba_scenariuszy)
+liczba_strat7 <- rnbinom(n = liczba_scenariuszy, size = n, prob = p)
+
+for(i in 1:liczba_scenariuszy){
+  n_w_roku <- liczba_strat7[i]
+  if(n_w_roku > 0){
+    kwoty <- rweibull(n = n_w_roku, shape = shape_w, scale = scale_w)
+    roczne_straty7[i] <- sum(kwoty)
+  }
+  else {
+    roczne_straty7[i] <- 0
+  }
+}
+
+```
+
+
+
+## OppVar i ES
+
+Wszystkie wyniki sum dotkliwości dla poszczególnych linii są sumowane i tak w kolumnie Suma_Bank znajduje się suma strat z wszystkich linii biznesowych dla każdego z 20 000 scenariuszy. Obliczony został OpVar oraz ES. 
+
+```{r}
+tabela_bank <- data.frame(
+  Buss_Distr = roczne_straty1,
+  Com_Ban    = roczne_straty2,
+  Damage = roczne_straty3,
+  Empl_Pract = roczne_straty4, 
+  Execut_Del  = roczne_straty5,
+  External_Fr    = roczne_straty6,
+  Internal_Fr    = roczne_straty7
+)
+
+tabela_bank$Suma_Bank <- rowSums(tabela_bank)
+
+op_var <- quantile(tabela_bank$Suma_Bank, 0.999, type=7)
+
+es<- mean(tabela_bank$Suma_Bank[tabela_bank$Suma_Bank > op_var])
+```
+
+```{r echo=FALSE}
+kable(t(data.frame(VaR = op_var, ES = es)))
+```
+
+
+## Rozkład wielkości strat
+
+Na poniższym histogramie przedstawiono rozkład sum wielkości strat z wszystkich 20 000 zasymulowanych scenariuszy. Przez wielkie różnice między stratami, w celu wizualizacji wykorzystano skalę logarytmiczną. Nałożone zostały także wyniki OpVar oraz ES. Znaczna odległość między tymi miarami wskazuje na ciężkie ogony w rozkładzie. Duża przestrzeń między brzuchem rozkładu a jego ogonem wynika z charakterystyki ryzyka operacyjnego, które występuje rzadko, lecz z ekstremalną skalą.
+
+
+```{r echo=FALSE}
+ggplot(data.frame(x = tabela_bank$Suma_Bank), aes(x)) +
+  geom_histogram(bins = 100, fill = "skyblue", color = "black") +
+  scale_x_log10(labels = label_number(suffix = " mln", scale = 1e-6, big.mark = " ")) +
+  
+  geom_vline(xintercept = op_var, color = "red", linetype = "dashed", linewidth = 1) +
+
+  geom_vline(xintercept = es, color = "darkred", linetype = "solid", linewidth = 1) +
+
+  annotate("text", x = op_var, y = 10, label = "VaR 99.9%", 
+           color = "red", angle = 90, vjust = -0.5, fontface = "bold", size = 3) +
+  annotate("text", x = es, y = 10, label = "ES 99.9%", 
+           color = "darkred", angle = 90, vjust = 1.5, fontface = "bold", size = 3) +
+  
+  labs(title = "Rozkład Scenariuszy",
+       x = "Wielkość straty (PLN)",
+       y = "Częstość") +
+  theme_bw()
+```
+
+# Część II
+
+## Wprowadzenie
+
+W części drugiej zostanie powtórzone badanie przeprowadzone w części I, jednak na siłę założymy, że rozkład dotkliwości strat w każdej z linii jest kolejno Weibulla, lognormalny, wykładniczy.
+Zarówno dla 3 nowych przypadków jak i oryginalnego badania zastosowana będzie procedura n razy i wyznaczona będzie średnia wartość OpVar, ES oraz odchylenia standardowe. Wszystkie wyniki zostaną porównane. 
+
+Dodatkowo, wykorzystana będzie funkcja oraz pętle automatyzujące całe badanie. 
+
+
+```{r}
+linie_nazwy <- names(lista_czestosci)
+oryg_czestosc <- c("dwum", "ujem", "dwum", "poiss", "poiss", "dwum", "ujem")
+oryg_dotkliwosc <- c("weibull", "lognorm", "weibull", "weibull", "weibull", "weibull", "weibull")
+
+symulacja <- function(nazwa_wersji, zalozone_dotkliwosci, n_iter = 10, n_scen = 20000) {
+  parametry <- list()
+  for (i in 1:7) {
+    linia <- linie_nazwy[i]
+    rok <- lista_czestosci[[linia]]
+    straty <- lista_strat[[linia]]
+    
+    cz_typ <- oryg_czestosc[i]
+    cz_par <- list()
+    if (cz_typ == "poiss") { cz_par$lambda <- mean(rok) } 
+    else if (cz_typ == "dwum") { cz_par$p <- 1 - (var(rok)/mean(rok)); cz_par$n <- round(mean(rok)/cz_par$p) } 
+    else if (cz_typ == "ujem") { cz_par$n <- mean(rok)^2/(var(rok)-mean(rok)); cz_par$p <- mean(rok)/var(rok) }
+    
+    dot_typ <- zalozone_dotkliwosci[i]
+    dot_par <- list()
+    if (dot_typ == "weibull") {
+      fit <- suppressWarnings(fitdist(straty, "weibull"))
+      dot_par$shape <- fit$estimate["shape"]; dot_par$scale <- fit$estimate["scale"]
+    } else if (dot_typ == "lognorm") {
+      fit <- suppressWarnings(fitdist(straty, method="mme", "lnorm"))
+      dot_par$meanlog <- fit$estimate["meanlog"]; dot_par$sdlog <- fit$estimate["sdlog"]
+    } else if (dot_typ == "exp") {
+      fit <- suppressWarnings(fitdist(straty, method="mme", "exp"))
+      dot_par$rate <- fit$estimate["rate"]
+    }
+    
+    parametry[[linia]] <- list(cz_typ = cz_typ, cz_par = cz_par, dot_typ = dot_typ, dot_par = dot_par)
+  }
+  #print(parametry)
+  
+  var_wyniki <- numeric(n_iter)
+  es_wyniki <- numeric(n_iter)
+  
+  for (k in 1:n_iter) {
+    suma_bank <- numeric(n_scen)
+    
+    for (linia in linie_nazwy) {
+      p <- parametry[[linia]]
+      if (p$cz_typ == "poiss") n_zdarzen <- rpois(n_scen, p$cz_par$lambda)
+      else if (p$cz_typ == "dwum") n_zdarzen <- rbinom(n_scen, p$cz_par$n, p$cz_par$p)
+      else if (p$cz_typ == "ujem") n_zdarzen <- rnbinom(n_scen, p$cz_par$n, p$cz_par$p)
+      
+      straty_linii <- numeric(n_scen)
+      for(j in 1:n_scen) {
+        n <- n_zdarzen[j]
+        if(n > 0) {
+          if (p$dot_typ == "weibull") kwoty <- rweibull(n, p$dot_par$shape, p$dot_par$scale)
+          else if (p$dot_typ == "lognorm") kwoty <- rlnorm(n, p$dot_par$meanlog, p$dot_par$sdlog)
+          else if (p$dot_typ == "exp") kwoty <- rexp(n, p$dot_par$rate)
+          
+          straty_linii[j] <- sum(kwoty)
+        }
+      }
+      suma_bank <- suma_bank + straty_linii
+    }
+    
+    var_999 <- quantile(suma_bank, 0.999, type = 7)
+    var_wyniki[k] <- var_999
+    es_wyniki[k] <- mean(suma_bank[suma_bank > var_999])
+  }
+  
+  return(data.frame(
+    Wersja = nazwa_wersji,
+    VaR_Srednia = mean(var_wyniki),
+    ES_Srednia = mean(es_wyniki),
+    VaR_Odchylenie = sd(var_wyniki),
+    ES_Odchylenie = sd(es_wyniki)
+  ))
+}
+```
+
+## Badanie
+
+Oryginalne:
+
+```{r}
+set.seed(67)
+wyniki_oryginalne <- symulacja("Oryginalna", oryg_dotkliwosc)
+```
+
+Weibull:
+
+```{r}
+set.seed(67)
+wyniki_weibull <- symulacja("Tylko Weibull", rep("weibull", 7))
+
+```
+
+LogNorm:
+
+```{r}
+set.seed(67)
+wyniki_lognorm <- symulacja("Tylko LogNorm", rep("lognorm", 7))
+```
+
+Wykładniczy:
+
+```{r}
+set.seed(67)
+wyniki_exp <- symulacja("Tylko Wykładniczy", rep("exp", 7))
+```
+
+## Porównanie
+
+Na poniższej tabeli przedstawiono średnie wartości VaR, ES oraz ich odchylenia standardowe z 10 iteracji dla wszystkich wersji badania. Przede wszystkim wyniki nie są porównywalne, widzimy duże rozbieżności w wynikach. Najbardziej oddalone od reszty są wyniki z symulacji gdzie z góry skorzystano z rozkładu Lognorm dla rozkładów dotkliwości strat. Rozkład ten charakteryzujący się bardzo ciężkim ogonem, bardzo przeszacował straty. 
+
+Przy zastosowaniu rozkładu Weibulla i wykładniczego wyniki są o wiele mniejsze. Różnice między VaR i ES są bardzo małe co świadczy o braku grubego ogona i wielu ekstremalnych strat.
+
+Wersja oryginalna w 6 na 7 linii wykorzystuje rozkład Weibulla, tylko w 2. linii korzysta z rozkładu LogNorm. Rozkład ten sprawia, że wyniki VaR i ES rosną kolejno około 10 i 19 krotnie. Pokazuje to, że druga linia generuje większość ekstremalnego ryzyka dla rozważanych danych.
+
+Wyniki te pokazują jak wielkie konsekwencje niesie za sobą błędne dobranie rozkładu w modelu. Mogłoby dojść do sytuacji gdzie zamiast odłożyć 23 mln na ryzyko operacyjne, odłożonoby tylko 8 mln co wiązałoby się być może z niewypłacalnością. Z drugiej strony, niewłaściwe zamrożenie zbyt dużej kwoty na rezerwy, byłoby dla spółki nieefektywne.
+
+```{r echo=FALSE}
+tabela_porownawcza <- rbind(
+  wyniki_oryginalne,
+  wyniki_weibull,
+  wyniki_lognorm,
+  wyniki_exp
+)
+
+kable(tabela_porownawcza, 
+      format.args = list(big.mark = " ", scientific = FALSE),
+      caption = "Porównanie miar VaR i ES po 10 iteracjach (20 000 scenariuszy każda)")
+```
+
+
+
+
